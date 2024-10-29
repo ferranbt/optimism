@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"github.com/ethereum/go-ethereum"
 	gethevent "github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	gn "github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	altda "github.com/ethereum-optimism/optimism/op-alt-da"
 	"github.com/ethereum-optimism/optimism/op-node/metrics"
@@ -424,7 +427,36 @@ func (n *OpNode) initL2(ctx context.Context, cfg *Config) error {
 	} else {
 		n.safeDB = safedb.Disabled
 	}
-	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, n.l2Source, n.l1Source,
+
+	var l2Source driver.L2Chain
+	{
+		// use a hardcoded jwt token, same as the fallback token but we cannot access it easily from here
+		// on the future this would be a separated token
+		buf, err := hex.DecodeString("688f5d737bad920bdfb2fc2f488d6b6209eebda1dae949a8de91398d932c517a")
+		if err != nil {
+			return fmt.Errorf("failed to decode hardcoded jwt token: %w", err)
+		}
+
+		buf32 := [32]byte{}
+		copy(buf32[:], buf)
+
+		// enable this with a flag
+		opts := []rpc.ClientOption{
+			rpc.WithHTTPAuth(gn.NewJWTAuth(buf32)),
+		}
+		rpcClient, err := rpc.DialOptions(context.Background(), "http://builder-op-geth:8551", opts...)
+		if err != nil {
+			return fmt.Errorf("failed to create builder RPC client: %w", err)
+		}
+
+		builderClient, err := sources.NewEngineClient(client.NewBaseRPCClient(rpcClient), n.log, nil, rpcCfg)
+		if err != nil {
+			return fmt.Errorf("failed to create Engine client: %w", err)
+		}
+		l2Source = sources.NewBuilderClient(n.log, n.l2Source, builderClient)
+	}
+
+	n.l2Driver = driver.NewDriver(n.eventSys, n.eventDrain, &cfg.Driver, &cfg.Rollup, l2Source, n.l1Source,
 		n.supervisor, n.beacon, n, n, n.log, n.metrics, cfg.ConfigPersistence, n.safeDB, &cfg.Sync, sequencerConductor, altDA)
 	return nil
 }
